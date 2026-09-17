@@ -1,0 +1,438 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://factos.example/schemas/ficha.schema.json",
+  "title": "Ficha de verificación — FACTOS",
+  "description": "Contrato C5. Formaliza la plantilla de tres capas (hecho / evidencia / análisis) definida en el contrato editorial. Es el formato de intercambio entre Supabase (A1), el build estático (A4) y el export a Git. Válido para ambas variantes de sitio (C6); el campo 'analisis' se omite o se vacía en la variante independiente si A6 así lo decide para esa ficha.",
+  "type": "object",
+  "required": [
+    "id",
+    "slug",
+    "version",
+    "veredicto",
+    "titulo_publico",
+    "resumen_hecho",
+    "metodologia",
+    "actor",
+    "afirmacion",
+    "evidencia",
+    "estado",
+    "historial_correcciones",
+    "hash_contenido"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Identificador estable. Nunca cambia entre versiones de la misma ficha."
+    },
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+      "description": "Parte final de la URL, ej. 'gasto-publico-crecio-3-por-ciento'. Inmutable tras publicar; si debe cambiar, se aplica 301 permanente y se registra en historial_correcciones."
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Se incrementa en cada corrección publicada."
+    },
+    "veredicto": {
+      "type": "string",
+      "enum": [
+        "exacto",
+        "exacto_descontextualizado",
+        "impreciso",
+        "falso",
+        "insostenible",
+        "no_verificable"
+      ],
+      "description": "Escala cerrada. Definida en contrato-editorial.md D2. No admite valores fuera de esta lista."
+    },
+    "titulo_publico": {
+      "type": "string",
+      "minLength": 10,
+      "maxLength": 200,
+      "description": "Redactado en lenguaje hablado, como la gente busca ('¿Es cierto que...?'). Nunca incluye el veredicto."
+    },
+    "resumen_hecho": {
+      "type": "string",
+      "minLength": 1,
+      "description": "CAPA 1. Neutro, sin adjetivos sobre personas. Idéntico en ambas variantes de sitio."
+    },
+    "metodologia": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Qué se revisó, qué supuestos se usaron, qué no se pudo verificar. Obligatorio incluso en veredicto no_verificable (qué se consultó y no estaba disponible)."
+    },
+    "analisis": {
+      "type": "object",
+      "description": "CAPA 3. Vive en tabla separada analisis_variante (migración 002), no en un campo inline de verificacion — así el rol analista_partido puede escribir su variante sin tener ningún acceso a Capa 1/2. Claves = variante ('independiente' | 'partido'), valor = texto o null si no hay análisis para esa variante.",
+      "additionalProperties": false,
+      "properties": {
+        "independiente": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "partido": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "actor": {
+      "type": "object",
+      "required": [
+        "id",
+        "slug",
+        "nombre_completo"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "slug": {
+          "type": "string"
+        },
+        "nombre_completo": {
+          "type": "string"
+        },
+        "cargo": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "titulo": {
+              "type": "string"
+            },
+            "institucion": {
+              "type": "string"
+            },
+            "desde": {
+              "type": "string",
+              "format": "date"
+            },
+            "hasta": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date"
+            }
+          }
+        }
+      }
+    },
+    "afirmacion": {
+      "type": "object",
+      "required": [
+        "texto_literal",
+        "captura"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "texto_literal": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Cita exacta. Nunca parafraseada."
+        },
+        "ts_inicio_seg": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "ts_fin_seg": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "contexto_previo": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Obligatorio (no null) si captura.tipo es video, audio o transmision. Mínimo 60 segundos de contenido previo."
+        },
+        "contexto_posterior": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Misma regla que contexto_previo, posterior al fragmento citado."
+        },
+        "captura": {
+          "type": "object",
+          "required": [
+            "id",
+            "tipo",
+            "url_original",
+            "sha256",
+            "capturado_en"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "tipo": {
+              "type": "string",
+              "enum": [
+                "video",
+                "audio",
+                "acta_sesion",
+                "texto",
+                "imagen",
+                "transmision"
+              ]
+            },
+            "url_original": {
+              "type": "string",
+              "format": "uri"
+            },
+            "snapshot_url": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uri"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "publicado_en": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            },
+            "capturado_en": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        }
+      }
+    },
+    "evidencia": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Regla dura: nunca vacío en una ficha publicada. Cada elemento debe apuntar a una fuente_cruda archivada (contrato C2).",
+      "items": {
+        "type": "object",
+        "required": [
+          "cita_textual",
+          "localizador",
+          "fuente_cruda",
+          "metodo"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "cita_textual": {
+            "type": "string",
+            "minLength": 1
+          },
+          "localizador": {
+            "type": "object",
+            "description": "Puntero exacto al origen. Forma libre según el tipo de fuente: {'pagina': 14} | {'articulo': '...'} | {'xpath': '...'} | {'hoja': '...', 'celda': '...'}"
+          },
+          "valor_extraido": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "unidad": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "metodo": {
+            "type": "string",
+            "enum": [
+              "api",
+              "parser",
+              "manual"
+            ]
+          },
+          "fuente_cruda": {
+            "type": "object",
+            "required": [
+              "sha256",
+              "url",
+              "obtenido_en"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "url": {
+                "type": "string",
+                "format": "uri"
+              },
+              "obtenido_en": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "snapshot_url": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uri"
+              },
+              "http_headers": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "description": "Cabeceras HTTP capturadas en el momento de la cosecha (ETag, Last-Modified, Content-Type). Junto con snapshot_url, es lo que da procedencia y momento de captura — el sha256 por sí solo sólo prueba integridad posterior."
+              },
+              "metodo_captura": {
+                "type": "string",
+                "enum": [
+                  "harvester_automatico",
+                  "carga_manual",
+                  "api_oficial"
+                ]
+              },
+              "snapshot_no_disponible_motivo": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Obligatorio si snapshot_url es null (constraint fuente_cruda_snapshot_o_motivo en migración 002). Nunca ambos null."
+              }
+            }
+          }
+        }
+      }
+    },
+    "temas": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "estado": {
+      "type": "string",
+      "enum": [
+        "borrador",
+        "en_revision",
+        "publicada",
+        "retirada"
+      ]
+    },
+    "verificador": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Identificador interno, no PII."
+    },
+    "revisor": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Debe ser distinto de verificador cuando estado es 'publicada'."
+    },
+    "publicado_en": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "historial_correcciones": {
+      "type": "array",
+      "description": "Append-only. Complementado por la tabla pública verificacion_revision (migración 002), que guarda snapshots completos e inmutables de cada versión publicada — este array documenta el motivo del cambio; verificacion_revision es la prueba verificable de qué decía cada versión.",
+      "items": {
+        "type": "object",
+        "required": [
+          "tipo",
+          "descripcion",
+          "ocurrido_en"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "tipo": {
+            "type": "string",
+            "enum": [
+              "correccion",
+              "aclaracion",
+              "retiro"
+            ]
+          },
+          "descripcion": {
+            "type": "string"
+          },
+          "campo_afectado": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "valor_anterior": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ocurrido_en": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      }
+    },
+    "hash_contenido": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "SHA-256 del contenido publicado (resumen_hecho + metodologia + evidencia serializada). Se publica junto a la ficha para que un tercero pueda verificar que no cambió fuera del historial de correcciones."
+    },
+    "variantes": {
+      "type": "object",
+      "description": "Contrato C6. Controla qué se renderiza en cada salida de build. Si se omite, ambas variantes muestran la ficha igual salvo por 'analisis'.",
+      "additionalProperties": false,
+      "properties": {
+        "independiente": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mostrar_analisis": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
+        "partido": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mostrar_analisis": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        }
+      }
+    }
+  }
+}

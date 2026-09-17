@@ -1,0 +1,149 @@
+name: alerta-uso
+
+# Segunda capa de alerta (la primera es el correo nativo de Supabase, que
+# SÍ cubre egreso). Corrige un error de diseño detectado en revisión externa:
+# la versión anterior asumía GET /v1/projects/{ref}/usage con campos
+# db_size_bytes/egress_bytes — ese endpoint no existe públicamente
+# documentado en esa forma. Ver comentarios en scripts/calcular_uso.py.
+#
+# Lo que este job SÍ puede verificar de forma real:
+#   - Tamaño de base de datos: consulta SQL directa (pg_database_size).
+#   - Utilización de disco físico: GET /v1/projects/{ref}/config/disk/util
+#     (endpoint real y documentado — señal complementaria, no la misma
+#     métrica que la cuota de "500 MB database size").
+# Lo que este job NO puede verificar (limitación real, no un "pendiente"):
+#   - Egreso/bandwidth. No hay endpoint público estable para leerlo en
+#     tiempo real. Depende exclusivamente de la alerta nativa de Supabase
+#     por correo al billing email de la organización.
+on:
+  schedule:
+    - cron: "0 8 * * 1"   # lunes 08:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  issues: write
+
+jobs:
+  revisar-uso:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verificar secret mínimo requerido
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DATABASE_URL:-}" ]; then
+            echo "::error::Falta SUPABASE_DB_URL. Es el único secret estrictamente necesario para este job (tamaño de base)."
+            exit 1
+          fi
+
+      - name: Instalar cliente de Postgres
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -yqq postgresql-client
+
+      - name: Consultar tamaño real de la base (pg_database_size)
+        id: db_size
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          bytes=$(psql "${DATABASE_URL}" -t -A -c "select pg_database_size(current_database());" | tr -d '[:space:]')
+          if ! [[ "$bytes" =~ ^[0-9]+$ ]]; then
+            echo "::error::pg_database_size no devolvió un número válido: '${bytes}'"
+            exit 1
+          fi
+          echo "db_bytes=${bytes}" >> "$GITHUB_OUTPUT"
+          echo "Tamaño de base: ${bytes} bytes"
+
+      - name: Consultar utilización de disco (opcional — requiere Management API)
+        id: disk
+        continue-on-error: true
+        env:
+          TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TOKEN:-}" ] || [ -z "${PROJECT_REF:-}" ]; then
+            echo "SUPABASE_ACCESS_TOKEN o SUPABASE_PROJECT_REF no configurados — se omite esta señal complementaria, no es un fallo del job."
+            exit 0
+          fi
+          respuesta=$(curl -s -w "\n%{http_code}" \
+            "https://api.supabase.com/v1/projects/${PROJECT_REF}/config/disk/util" \
+            -H "Authorization: Bearer ${TOKEN}")
+          http_code=$(echo "$respuesta" | tail -n1)
+          cuerpo=$(echo "$respuesta" | sed '$d')
+          if [ "$http_code" != "200" ]; then
+            echo "La consulta de disk util respondió ${http_code} — se omite esta señal, no se falla el job por esto."
+            echo "$cuerpo"
+            exit 0
+          fi
+          echo "$cuerpo" > /tmp/disk.json
+          cat /tmp/disk.json
+          used=$(python3 -c "import json; print(json.load(open('/tmp/disk.json'))['metrics']['fs_used_bytes'])")
+          size=$(python3 -c "import json; print(json.load(open('/tmp/disk.json'))['metrics']['fs_size_bytes'])")
+          echo "used=${used}" >> "$GITHUB_OUTPUT"
+          echo "size=${size}" >> "$GITHUB_OUTPUT"
+
+      - name: Calcular porcentajes de uso
+        id: calculo
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.disk.outputs.used }}" != "" ] && [ "${{ steps.disk.outputs.size }}" != "" ]; then
+            python3 .github/workflows/scripts/calcular_uso.py \
+              --db-bytes "${{ steps.db_size.outputs.db_bytes }}" \
+              --disk-used-bytes "${{ steps.disk.outputs.used }}" \
+              --disk-size-bytes "${{ steps.disk.outputs.size }}" \
+              "$GITHUB_OUTPUT"
+          else
+            python3 .github/workflows/scripts/calcular_uso.py \
+              --db-bytes "${{ steps.db_size.outputs.db_bytes }}" \
+              "$GITHUB_OUTPUT"
+          fi
+
+      - name: Abrir issue si se superó el umbral
+        if: steps.calculo.outputs.supera_umbral == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pctDb = "${{ steps.calculo.outputs.pct_db }}";
+            const dbMb = "${{ steps.calculo.outputs.db_mb }}";
+            const discoDisponible = "${{ steps.calculo.outputs.disk_disponible }}" === "true";
+            const pctDisk = "${{ steps.calculo.outputs.pct_disk }}";
+
+            const lineas = [
+              "## Alerta automática de uso — Supabase Free",
+              "",
+              `- Base de datos: **${dbMb} MB** (${pctDb}% de 500 MB, vía pg_database_size)`,
+            ];
+            if (discoDisponible) {
+              lineas.push(`- Utilización de disco físico: **${pctDisk}%** (señal complementaria, no la misma métrica que la cuota de base de datos)`);
+            }
+            lineas.push(
+              "",
+              "**Egreso NO está cubierto por esta alerta** — no existe un endpoint público",
+              "estable para leerlo. Si el egreso se acerca a su cuota, la única alerta es",
+              "el correo nativo de Supabase al billing email de la organización.",
+              "Confirmar que esa notificación está activa y llega a alguien que la revise.",
+              "",
+              "Se superó el 80% de la cuota de base de datos y/o de disco.",
+              "Referencia: `docs/plan-maestro.md` §11 (disparadores de escalamiento).",
+              "",
+              "Acción esperada: evaluar si es un patrón de crecimiento genuino",
+              "(→ considerar Supabase Pro, ~USD 25/mes) o un bug de arquitectura.",
+              "No activar el gasto sin registrar la decisión en la bitácora del plan."
+            );
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Alerta de uso Supabase — ${new Date().toISOString().slice(0,10)}`,
+              body: lineas.join("\n"),
+              labels: ["infraestructura", "costo", "alerta-automatica"]
+            });
+
+      - name: Resultado si no se superó el umbral
+        if: steps.calculo.outputs.supera_umbral != 'true'
+        run: |
+          echo "Uso dentro de rango: DB ${{ steps.calculo.outputs.pct_db }}%."
+          echo "Recordatorio: egreso no verificado por este job — depende del correo nativo de Supabase."

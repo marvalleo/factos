@@ -1,0 +1,90 @@
+name: backup
+
+# El plan Free de Supabase no incluye backups automáticos gestionados.
+# Este job es el reemplazo: pg_dump completo -> Cloudflare R2, semanal.
+# Ver docs/checkpoints.md: la restauración de este backup debe probarse
+# de punta a punta al menos una vez para que CP-1 se considere cerrado.
+on:
+  schedule:
+    - cron: "0 5 * * 0"   # domingo 05:00 UTC
+  workflow_dispatch: {}
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verificar secrets requeridos
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET_BACKUPS }}
+        run: |
+          set -euo pipefail
+          faltantes=()
+          [ -z "${DATABASE_URL:-}" ] && faltantes+=("SUPABASE_DB_URL")
+          [ -z "${R2_ACCESS_KEY_ID:-}" ] && faltantes+=("R2_ACCESS_KEY_ID")
+          [ -z "${R2_SECRET_ACCESS_KEY:-}" ] && faltantes+=("R2_SECRET_ACCESS_KEY")
+          [ -z "${R2_ENDPOINT:-}" ] && faltantes+=("R2_ENDPOINT")
+          [ -z "${R2_BUCKET:-}" ] && faltantes+=("R2_BUCKET_BACKUPS")
+          if [ ${#faltantes[@]} -gt 0 ]; then
+            echo "::error::Faltan secrets: ${faltantes[*]}"
+            exit 1
+          fi
+
+      - name: Instalar cliente de Postgres
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -yqq postgresql-client
+
+      - name: Instalar AWS CLI (compatible con R2)
+        run: |
+          curl -s "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
+          unzip -q awscliv2.zip
+          sudo ./aws/install --update
+
+      - name: pg_dump completo
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          FECHA=$(date -u +%Y-%m-%dT%H%M%SZ)
+          echo "FECHA=${FECHA}" >> "$GITHUB_ENV"
+          # --no-owner --no-privileges: evita fallos al restaurar en un
+          # proyecto Supabase distinto, donde los roles no coinciden exacto.
+          pg_dump "${DATABASE_URL}" \
+            --format=custom \
+            --no-owner \
+            --no-privileges \
+            --file="factos-backup-${FECHA}.dump"
+
+          echo "Tamaño del dump:"
+          ls -lh "factos-backup-${FECHA}.dump"
+
+      - name: Subir a R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET_BACKUPS }}
+        run: |
+          set -euo pipefail
+          aws s3 cp "factos-backup-${FECHA}.dump" \
+            "s3://${R2_BUCKET}/backups/factos-backup-${FECHA}.dump" \
+            --endpoint-url "${R2_ENDPOINT}"
+
+      - name: Purgar backups locales del runner
+        run: rm -f factos-backup-*.dump
+
+      - name: Registrar resultado
+        run: |
+          echo "Backup completado: factos-backup-${FECHA}.dump subido a R2 — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  # Nota operativa (no automatizada aquí, a propósito): la RESTAURACIÓN debe
+  # probarse manualmente contra un proyecto Supabase de prueba, no contra
+  # producción. docs/checkpoints.md exige al menos una prueba de restauración
+  # completa antes de cerrar CP-1, con el tiempo que tomó documentado.
+  # Comando de referencia para esa prueba:
+  #   pg_restore --clean --no-owner --no-privileges \
+  #     --dbname="<url-del-proyecto-de-prueba>" factos-backup-<fecha>.dump

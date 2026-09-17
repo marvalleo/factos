@@ -1,0 +1,50 @@
+name: keep-alive
+
+# Evita que Supabase Free pause el proyecto por inactividad (ocurre a los 7
+# días sin actividad). Corre con margen amplio, no al límite.
+#
+# Corrección (revisión externa): la versión anterior aceptaba cualquier
+# código < 500 como "éxito", incluyendo 400/401/403/404/429 — una clave mal
+# configurada podía dejar el job en verde de forma indefinida. Ahora exige
+# 200 exacto. Requiere que las migraciones (001 + 002) ya estén aplicadas,
+# porque la tabla 'tema' debe existir para que la respuesta sea 200 real.
+on:
+  schedule:
+    - cron: "0 6 * * 1,4"   # lunes y jueves, 06:00 UTC — cada 3-4 días
+  workflow_dispatch: {}      # permite disparo manual para pruebas
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Consulta trivial a Supabase — exige HTTP 200
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SUPABASE_URL:-}" ] || [ -z "${SUPABASE_ANON_KEY:-}" ]; then
+            echo "::error::Faltan SUPABASE_URL o SUPABASE_ANON_KEY en los secrets del repo."
+            exit 1
+          fi
+
+          http_code=$(curl -s -o /tmp/respuesta.json -w "%{http_code}" \
+            "${SUPABASE_URL}/rest/v1/tema?select=id&limit=1" \
+            -H "apikey: ${SUPABASE_ANON_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_ANON_KEY}")
+
+          echo "HTTP status: ${http_code}"
+          cat /tmp/respuesta.json
+
+          # Estricto: sólo 200 cuenta como éxito. Cualquier otro código
+          # (401/403 = credencial mala, 404 = tabla no existe o URL mal
+          # configurada, 429 = rate limit, 5xx = proyecto pausado o caído)
+          # se trata como fallo — el job debe fallar de forma ruidosa, no
+          # quedar verde con una configuración rota.
+          if [ "${http_code}" != "200" ]; then
+            echo "::error::Se esperaba HTTP 200 y se recibió ${http_code}. No se acepta como éxito — revisar credenciales, URL, o si el proyecto está pausado."
+            exit 1
+          fi
+
+      - name: Confirmar resultado
+        run: echo "Keep-alive OK — $(date -u +%Y-%m-%dT%H:%M:%SZ)"

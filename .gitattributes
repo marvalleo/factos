@@ -1,0 +1,21 @@
+# Fuerza LF en archivos que corren en runners Linux (GitHub Actions) o que
+# se parsean estrictamente. Sin esto, checkout en Windows con core.autocrlf
+# puede insertar CRLF dentro de bloques `run: |` de los workflows, y Bash en
+# el runner Ubuntu falla con "$'\r': command not found".
+* text=auto eol=lf
+
+*.sh   text eol=lf
+*.py   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.sql  text eol=lf
+*.md   text eol=lf
+*.json text eol=lf
+
+# Los .ps1, si se agregan más adelante, mantienen CRLF por convención Windows.
+*.ps1  text eol=crlf
+
+# Binarios — nunca normalizar.
+*.png  binary
+*.jpg  binary
+*.pdf  binary
